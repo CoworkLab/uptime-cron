@@ -1,0 +1,184 @@
+# uptime-cron
+
+Self-hosted, cron-job.org style **scheduling API** (no UI — API only) with **Telegram-scoped multi-user jobs**. Built to run free on Render, with Turso (libSQL) as the database.
+
+- Node 20 + Express
+- Turso (libSQL) cloud storage — survives restarts, deploys and free-tier spin-downs
+- Per-user job isolation via Telegram IDs (perfect backend for a Telegram bot)
+- Dev key for full global admin access
+- Minimum schedule interval: **2 minutes** (strictly validated, including tricky cron gaps)
+- Clean, consistent JSON responses — one envelope everywhere
+
+---
+
+## Auth
+
+Send your key with every request (except `/healthz` and `/`):
+
+```
+Authorization: Bearer <api_key>
+```
+(`X-API-Key: <api_key>` header also accepted)
+
+| Key type | Who | Powers |
+|---|---|---|
+| `uc_dev_...` | Bot developer / admin | Everything: all users, all jobs, global stats, register users |
+| `uc_user_...` | Telegram user (via bot) | Only their own jobs — automatically scoped, cannot be bypassed |
+
+### Bot integration flow
+
+```
+1. New Telegram user -> bot calls POST /v1/users (dev key) { telegram_id, username }
+2. Store the returned api_key for that user
+3. Bot performs all user actions with the user's key (scoping is automatic)
+```
+
+Shortcut: the dev key + `telegram_id` in the request body also works for any user operation.
+
+---
+
+## Schedules (all accepted forms)
+
+| Form | Example | Notes |
+|---|---|---|
+| 5-field cron | `0 9 * * *` | Standard cron |
+| Presets | `@hourly`, `@daily`, `@weekly`, `@monthly` | |
+| True interval | `@every 5m`, `@every 30m`, `@every 2h` | Min 2 minutes |
+| Object | `{"cron":"0 9 * * *","timezone":"Asia/Kolkata"}` | |
+| cron-job.org style | `{"minutes":[0,30],"hours":[9],"mdays":["*"],"wdays":["*"],"months":["*"]}` | Converted internally |
+
+**2-minute rule:** before a job is accepted, the engine computes the next runs and rejects any schedule whose smallest gap is below 120 seconds — so `*/1 * * * *`, `0,1 * * * *`, `{"minutes":[0,1]}` and `@every 90s` are all rejected with `INTERVAL_TOO_SHORT`. Seconds-level (6-field) crons are not supported.
+
+Timezone: any IANA timezone (default from `DEFAULT_TIMEZONE` env, e.g. `Asia/Kolkata`).
+
+---
+
+## Endpoints (26)
+
+### Open
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | API info |
+| GET | `/healthz` | Keep-alive ping -> `{ "ok": true }` |
+
+### Any valid key
+| Method | Path | Description |
+|---|---|---|
+| GET | `/v1/me` | Key info, quota usage |
+| POST | `/v1/jobs` | Create job |
+| GET | `/v1/jobs` | List jobs (`?search&enabled&status&tag&sort&order&limit&offset`) |
+| GET | `/v1/jobs/:id` | Job detail + last execution |
+| PATCH / PUT | `/v1/jobs/:id` | Update (partial / full) |
+| DELETE | `/v1/jobs/:id` | Delete job + history |
+| POST | `/v1/jobs/:id/stop` | Pause |
+| POST | `/v1/jobs/:id/start` | Resume |
+| POST | `/v1/jobs/:id/run` | Run now (async) |
+| GET | `/v1/jobs/:id/history` | Execution logs (`?status&limit&offset`) |
+| GET | `/v1/jobs/:id/history/:execId` | Single execution (with full response body) |
+| DELETE | `/v1/jobs/:id/history` | Clear logs |
+| GET | `/v1/jobs/:id/stats` | Success rate, avg duration, next runs |
+| POST | `/v1/jobs/bulk` | `{ action: "pause"\|"resume"\|"delete"\|"run", job_ids: [...] }` |
+| POST | `/v1/jobs/import/curl` | Import from a curl command (`create: true` to create directly) |
+| POST | `/v1/meta/preview-schedule` | Next N run times + human text |
+| POST | `/v1/meta/parse-cron` | Cron -> human text |
+| GET | `/v1/meta/timezones` | Common timezones |
+
+### Dev key only
+| Method | Path | Description |
+|---|---|---|
+| POST | `/v1/users` | Register Telegram user -> generates `api_key` |
+| GET | `/v1/users` | List users + job counts |
+| GET | `/v1/users/:telegram_id` | User detail + their jobs |
+| DELETE | `/v1/users/:telegram_id` | Delete user (cascade: jobs + history) |
+| POST | `/v1/users/:telegram_id/regenerate-key` | Rotate user key |
+| GET | `/v1/stats` | Global stats |
+
+---
+
+## Response format
+
+```json
+{ "ok": true, "data": { ... } }
+```
+```json
+{ "ok": false, "error": { "code": "JOB_NOT_FOUND", "message": "Job not found or does not belong to you", "status": 404 } }
+```
+
+Error codes: `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `JOB_NOT_FOUND`, `EXECUTION_NOT_FOUND`, `USER_NOT_FOUND`, `USER_ALREADY_EXISTS`, `VALIDATION_ERROR`, `URL_INVALID`, `INTERVAL_TOO_SHORT`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `PAYLOAD_TOO_LARGE`, `INVALID_JSON`, `INTERNAL_ERROR`.
+
+## Examples
+
+Create a job:
+```bash
+curl -X POST https://<your-host>/v1/jobs \
+  -H "Authorization: Bearer <api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Morning ping",
+    "url": "https://example.com/api/ping",
+    "method": "POST",
+    "headers": {"Authorization": "Bearer xyz"},
+    "body": "{\"hello\":\"world\"}",
+    "schedule": "0 9 * * *",
+    "timezone": "Asia/Kolkata",
+    "max_retries": 2,
+    "retry_interval": 60,
+    "failure_webhook": "https://your-bot.example/notify"
+  }'
+```
+
+Import from curl:
+```bash
+curl -X POST https://<your-host>/v1/jobs/import/curl \
+  -H "Authorization: Bearer <api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{"create": true, "schedule": "@every 10m", "curl": "curl -X POST https://api.example.com/ping -H \"X-Token: abc\""}'
+```
+
+## Job fields
+
+| Field | Default | Limits |
+|---|---|---|
+| `url` | required | http(s), max 2048 chars |
+| `method` | `GET` | GET/POST/PUT/PATCH/DELETE/HEAD |
+| `headers` | `{}` | max 20 entries |
+| `body` | null | max 64 KB, body-methods only |
+| `schedule` | required | see above, min 2-minute gap |
+| `timezone` | `DEFAULT_TIMEZONE` | IANA name |
+| `timeout` | 30 | 5-60 seconds |
+| `max_retries` | 0 | 0-3 |
+| `retry_interval` | 60 | 30-3600 seconds |
+| `failure_webhook` | null | POSTed on final failure with `{event, job, execution}` |
+| `save_responses` | true | store first 4 KB of response |
+| `tags` | `[]` | max 5 |
+| `expires_at` | null | auto-disable after this time |
+| `enabled` | true | |
+
+## Scheduler engine
+
+- 10-second tick loop; due jobs claimed atomically (no double runs)
+- Concurrency cap 20; per-job timeout 5-60s
+- Retries with interval; `failure_webhook` fires on final failure
+- History: last 50 executions per job (auto-trimmed)
+- Missed-while-down jobs run once on wake-up (catch-up), then normal schedule
+
+## Limits (env-configurable)
+
+| Env | Default | Meaning |
+|---|---|---|
+| `USER_JOB_LIMIT` | 25 | Jobs per Telegram user (dev unlimited) |
+| `MIN_INTERVAL_SECONDS` | 120 | Minimum schedule gap |
+| `HISTORY_LIMIT` | 50 | Executions kept per job |
+| `MAX_CONCURRENCY` | 20 | Parallel executions |
+| `RATE_LIMIT_PER_MIN` | 120 | API requests per key per minute |
+| `DEFAULT_TIMEZONE` | UTC | Default timezone |
+
+## Deploy (Render free)
+
+1. Push this repo to GitHub
+2. Render -> New Web Service -> connect repo
+3. Runtime: Node, Build: `npm install`, Start: `node src/server.js`
+4. Env vars: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `DEV_API_KEY`, `DEFAULT_TIMEZONE`
+5. Keep it awake: external pinger on `/healthz` every 5 minutes (free-tier services sleep after 15 idle minutes)
+
+Create a free Turso database at [turso.tech](https://turso.tech) — tables are created automatically on first boot.

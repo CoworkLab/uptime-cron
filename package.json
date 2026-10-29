@@ -1,0 +1,22 @@
+{
+  "name": "uptime-cron",
+  "version": "1.0.0",
+  "description": "Self-hosted cron-job.org style scheduling API with Telegram-scoped multi-user jobs. Node + Express + Turso. Runs on Render free tier.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --env-file=.env src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["cron", "scheduler", "uptime", "api", "turso", "render"],
+  "license": "MIT",
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "cron-parser": "^4.9.0",
+    "cronstrue": "^2.50.0",
+    "express": "^4.21.2"
+  }
+}

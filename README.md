@@ -1,6 +1,6 @@
 # uptime-cron
 
-Self-hosted, cron-job.org style **scheduling API** (no UI — API only) with **Telegram-scoped multi-user jobs**. Built to run free on Render, with Turso (libSQL) as the database. **v1.1.0**
+Self-hosted, cron-job.org style **scheduling + uptime monitoring API** (no UI — API only) with **Telegram-scoped multi-user jobs**. Built to run free on Render, with Turso (libSQL) as the database. **v1.2.0**
 
 - Node 20 + Express
 - Turso (libSQL) cloud storage — survives restarts, deploys and free-tier spin-downs
@@ -8,10 +8,8 @@ Self-hosted, cron-job.org style **scheduling API** (no UI — API only) with **T
 - Dev key for full global admin access
 - Minimum schedule interval: **2 minutes** (strictly validated, including tricky cron gaps)
 - **SSRF protection**: job URLs and webhook URLs are validated on create/update/import *and* re-validated at execution time (after DNS resolve, every redirect hop)
-- **Webhook events**: `failed`, `auto_disabled`, `recovered`, `success`
-- **Auto-disable** after N consecutive failures
-- **Timing breakdown** (dns/connect/tls/first-byte) per execution
-- Clean, consistent JSON responses — one envelope everywhere
+- **Webhook events**: `failed`, `auto_disabled`, `recovered`, `success` (+ `down`, `up`, `ssl_expiring`, `heartbeat_missed` to alert contacts)
+- **Uptime monitoring (v1.2.0)**: monitor types `http | keyword | port | ssl | heartbeat`, job states (`up/down/paused/pending`), incidents, uptime %, response-times, dashboards, alert contacts (telegram/email/webhook/discord/slack), maintenance windows, public status pages, CSV export
 
 ---
 
@@ -57,7 +55,7 @@ Timezone: any IANA timezone (default from `DEFAULT_TIMEZONE` env, e.g. `Asia/Kol
 
 ---
 
-## Endpoints (28)
+## Endpoints (53)
 
 ### Open
 | Method | Path | Description |
@@ -80,13 +78,25 @@ Timezone: any IANA timezone (default from `DEFAULT_TIMEZONE` env, e.g. `Asia/Kol
 | GET | `/v1/jobs/:id/history` | Execution logs (`?status&limit&offset`) |
 | GET | `/v1/jobs/:id/history/:execId` | Single execution (with full response body) |
 | DELETE | `/v1/jobs/:id/history` | Clear logs |
-| GET | `/v1/jobs/:id/stats` | Success rate, avg duration, next runs |
+| GET | `/v1/jobs/:id/stats` | Success rate, avg duration, next runs (+ `state`, `uptime_24h_percent`) |
+| GET | `/v1/jobs/:id/incidents` | Incidents of one job (`?ongoing=true&limit&offset`) |
+| GET | `/v1/jobs/:id/uptime` | `{uptime_percent, downtime_seconds, incidents, avg_response_ms, p95_response_ms}` (`?range=24h\|7d\|30d\|90d`) |
+| GET | `/v1/jobs/:id/response-times` | Downsampled chart points (`?range=&points=`) |
+| GET | `/v1/jobs/:id/history.csv` | CSV export of history |
+| GET | `/v1/incidents` | All incidents of the caller's jobs (`?job_id&ongoing&limit&offset`) |
+| GET | `/v1/dashboard` | `{jobs:{total,up,down,paused,pending}, ongoing_incidents, uptime_24h_percent, avg_response_ms}` |
 | GET | `/v1/folders` | Folder list with job counts (`?telegram_id=` for dev) |
 | POST | `/v1/jobs/bulk` | `{ action: "pause"\|"resume"\|"delete"\|"run", job_ids: [...] }` |
 | POST | `/v1/jobs/import/curl` | Import from a curl command (`create: true` to create directly) |
 | POST | `/v1/meta/preview-schedule` | Next N run times + human text |
 | POST | `/v1/meta/parse-cron` | Cron -> human text |
 | GET | `/v1/meta/timezones` | Common timezones |
+| POST/GET/GET:id/PATCH/DELETE | `/v1/contacts` | Alert contacts (+ `POST /v1/contacts/:id/test`) |
+| POST/GET/GET:id/PATCH/DELETE | `/v1/maintenance` | Maintenance windows |
+| POST/GET/GET:id/PATCH/DELETE | `/v1/status-pages` | Public status pages |
+| GET/POST | `/v1/heartbeat/:token` | **Public** heartbeat ping (rate limited 60/min) |
+| GET | `/status/:slug` | **Public** HTML status page (cached 30s, light/dark) |
+| GET | `/status/:slug/json` | **Public** status JSON |
 
 ### Dev key only
 | Method | Path | Description |
@@ -109,7 +119,7 @@ Timezone: any IANA timezone (default from `DEFAULT_TIMEZONE` env, e.g. `Asia/Kol
 { "ok": false, "error": { "code": "JOB_NOT_FOUND", "message": "Job not found or does not belong to you", "status": 404 } }
 ```
 
-Error codes: `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `JOB_NOT_FOUND`, `EXECUTION_NOT_FOUND`, `USER_NOT_FOUND`, `USER_ALREADY_EXISTS`, `VALIDATION_ERROR`, `URL_INVALID`, `INTERVAL_TOO_SHORT`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `PAYLOAD_TOO_LARGE`, `INVALID_JSON`, `INTERNAL_ERROR`.
+Error codes: `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `JOB_NOT_FOUND`, `EXECUTION_NOT_FOUND`, `USER_NOT_FOUND`, `USER_ALREADY_EXISTS`, `VALIDATION_ERROR`, `URL_INVALID`, `INTERVAL_TOO_SHORT`, `QUOTA_EXCEEDED`, `RATE_LIMITED`, `PAYLOAD_TOO_LARGE`, `INVALID_JSON`, `INTERNAL_ERROR`, `CONTACT_NOT_FOUND`, `MAINTENANCE_NOT_FOUND`, `STATUS_PAGE_NOT_FOUND`, `SLUG_TAKEN`, `INVALID_JOB_TYPE`.
 
 ## Examples
 
@@ -208,6 +218,32 @@ All webhooks are `POST`ed as JSON with `User-Agent: uptime-cron/1.1`:
 
 List view (`/history`) stays lean (no body/headers/timing). `duration_ms` is unchanged and backward compatible.
 
+## Uptime monitoring (v1.2.0)
+
+**A monitor is a job.** New optional `type` on the job object (default `http` — all v1.1 behavior unchanged):
+
+| Type | Extra fields | Check |
+|---|---|---|
+| `http` | `expected_status` (e.g. `["200-299","301"]`, default 200-299), `max_response_ms` | status/rule checks |
+| `keyword` | + `keyword` (max 200), `keyword_mode` (`exists`\|`not_exists`), `keyword_case_sensitive` | keyword searched in first 256 KB of body |
+| `port` | `port` (1-65535, required); `url` holds the host; no method/body/headers | TCP connect check |
+| `ssl` | `ssl_expiry_days` (default 14); `url` must be https | certificate expiry/validity |
+| `heartbeat` | `heartbeat_grace_seconds` (default 60); `url` optional; schedule = `@every` interval; `heartbeat_url` returned | no outgoing request — you ping `/v1/heartbeat/:token` |
+
+Invalid combos are rejected with `422 VALIDATION_ERROR`; a wrong `type` gives `422 INVALID_JOB_TYPE`.
+
+Read-only job fields: `state` (`up`\|`down`\|`paused`\|`pending`), `state_changed_at`, `last_error_code` (`TIMEOUT`, `DNS_ERROR`, `CONNECTION_REFUSED`, `TLS_ERROR`, `STATUS_MISMATCH`, `KEYWORD_MISSING`, `KEYWORD_FOUND`, `SLOW_RESPONSE`, `SSL_EXPIRING`, `HEARTBEAT_MISSED`), `heartbeat_url`.
+
+- State machine: success -> `up`, all retries failed -> `down`, disabled -> `paused`, never checked -> `pending`. Filter jobs with `?state=` and `?type=`.
+- **Incidents**: opened on down, closed on up (with `duration_seconds`). `GET /v1/jobs/:id/incidents` and `GET /v1/incidents`.
+- **Uptime math**: incidents minus maintenance windows minus monitoring gaps (Render sleeps > 10 min are recorded as gaps and excluded).
+- **Alert contacts**: `POST /v1/contacts {type: telegram\|email\|webhook\|discord\|slack, target, name}` (max 10/user). Jobs link via `alert_contact_ids` (empty -> your default telegram contact). Events: `down`, `up`, `ssl_expiring`, `heartbeat_missed`, `auto_disabled`. Honor `alert_on_down`, `alert_on_up`, `alert_after_minutes`, `repeat_alert_minutes`. Dedupe: one DOWN + one UP alert per incident. Telegram needs `TELEGRAM_BOT_TOKEN` env; email needs `RESEND_API_KEY` + `RESEND_FROM` (skipped when unset).
+- **Maintenance windows**: `POST /v1/maintenance {name, job_ids[], start_at, end_at, recurrence: none\|daily\|weekly, timezone}` (daily/weekly use `"HH:MM"`). Checks still run, but no alerts, no new incidents, and the time is excluded from uptime %.
+- **Status pages**: `POST /v1/status-pages {slug, title, job_ids[], uptime_days, message}` -> public `GET /status/:slug` (HTML, mobile friendly, light/dark, 30s cache) + `GET /status/:slug/json`. URLs/tokens are never exposed.
+- **Free-plan safety**: daily purge of incidents > 90d, rollups in `job_daily` so 30d/90d stats work with only 50 raw runs per job.
+
+Masking: header values and basic-auth passwords are returned as `***`; send `"***"` back on update to keep the stored value.
+
 ## Scheduler engine
 
 - 10-second tick loop; due jobs claimed atomically (no double runs)
@@ -230,6 +266,10 @@ List view (`/history`) stays lean (no body/headers/timing). `duration_ms` is unc
 | `MAX_CONCURRENCY` | 20 | Parallel executions |
 | `RATE_LIMIT_PER_MIN` | 120 | API requests per key per minute |
 | `DEFAULT_TIMEZONE` | UTC | Default timezone |
+| `TELEGRAM_BOT_TOKEN` | – | Telegram alert delivery (optional) |
+| `RESEND_API_KEY` / `RESEND_FROM` | – | Email alerts via Resend (optional) |
+| `USER_CONTACT_LIMIT` | 10 | Alert contacts per user |
+| `INCIDENTS_RETENTION_DAYS` | 90 | Incident history retention |
 
 ## Deploy (Render free)
 

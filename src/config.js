@@ -12,5 +12,12 @@ export const config = {
   tickSeconds: int(process.env.TICK_SECONDS, 10),
   maxConcurrency: int(process.env.MAX_CONCURRENCY, 20),
   rateLimitPerMin: int(process.env.RATE_LIMIT_PER_MIN, 120),
-  version: '1.1.0',
+  // v1.2.0 — uptime monitoring
+  selfBaseUrl: (process.env.RENDER_EXTERNAL_URL || 'https://uptime-cron.onrender.com').replace(/\/$/, ''),
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  resendFrom: process.env.RESEND_FROM || '',
+  userContactLimit: int(process.env.USER_CONTACT_LIMIT, 10),
+  incidentsRetentionDays: int(process.env.INCIDENTS_RETENTION_DAYS, 90),
+  version: '1.2.0',
 };

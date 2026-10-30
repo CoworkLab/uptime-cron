@@ -178,6 +178,38 @@ export async function assertSafeWebhookUrl(value, vOptionalUrl) {
 }
 
 /**
+ * Validate a bare hostname / IP (port checks, ssl checks) — same blocklist
+ * as assertSafeUrl but without the 80/443 port restriction.
+ * Throws generic URL_INVALID when unsafe.
+ */
+export async function assertSafeHost(rawHost) {
+  const host = cleanHostname(rawHost);
+  if (!host || host.length > 253) throw err.urlInvalid();
+  if (OWN_HOSTS.has(host)) throw err.urlInvalid();
+  if (BLOCKED_HOSTNAMES.has(host)) throw err.urlInvalid();
+  if (BLOCKED_SUFFIXES.some((s) => host.endsWith(s))) throw err.urlInvalid();
+
+  if (net.isIPv4(host) || net.isIPv6(host)) {
+    if (isBlockedIp(host)) throw err.urlInvalid();
+    return host;
+  }
+  // hostname charset sanity
+  if (!/^[a-z0-9._-]+$/i.test(host)) throw err.urlInvalid();
+
+  let addrs;
+  try {
+    addrs = await dns.promises.lookup(host, { all: true, verbatim: true });
+  } catch {
+    throw err.urlInvalid();
+  }
+  if (!addrs || !addrs.length) throw err.urlInvalid();
+  for (const a of addrs) {
+    if (isBlockedIp(a.address)) throw err.urlInvalid();
+  }
+  return host;
+}
+
+/**
  * DNS lookup wrapper for live requests: re-validates resolved addresses
  * right before the socket connects (DNS-rebind protection).
  * Supports both lookup modes Node requests:

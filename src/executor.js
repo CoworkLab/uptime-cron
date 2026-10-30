@@ -4,9 +4,19 @@ import { assertSafeUrl, safeLookup } from './ssrf.js';
 import { isValidTimezone } from './cron.js';
 
 const MAX_BODY_BYTES = 4096;
+const KEYWORD_READ_LIMIT = 256 * 1024; // keyword search reads first 256 KB
 const MAX_HEADERS_BYTES = 2048;
 const MAX_REDIRECTS = 5;
 const REDIRECT_METHODS = new Set([301, 302, 303]);
+
+function mapNetworkErrorCode(e) {
+  const code = e.code || '';
+  const msg = String(e.message || '').toLowerCase();
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'ENODATA') return 'DNS_ERROR';
+  if (code === 'ECONNREFUSED') return 'CONNECTION_REFUSED';
+  if (code.startsWith('ERR_TLS') || code.startsWith('CERT') || msg.includes('certificate') || msg.includes('ssl') || msg.includes('tls')) return 'TLS_ERROR';
+  return null;
+}
 
 function truncateStr(s, cap) {
   return s.length > cap ? s.slice(0, cap) + '…[truncated]' : s;
@@ -128,23 +138,29 @@ function requestHop(urlStr, { method, headers, body, timeoutMs }, state) {
 
 /**
  * Execute a job's HTTP request with SSRF checks, manual redirects and timing.
- * Returns { status, status_code, duration_ms, error, response_body, response_headers, timing }
+ * opts.readLimit: how much of the response body to read (default 4 KB;
+ *   keyword checks pass 256 KB so the keyword search sees enough of the body).
+ * Returns { status, status_code, duration_ms, error, error_code, response_body, response_headers, timing }
  * status: success | failed | timeout | error
+ * error_code (network-level): TIMEOUT | DNS_ERROR | CONNECTION_REFUSED | TLS_ERROR | null
  */
-export async function executeJob(job) {
+export async function executeJob(job, opts = {}) {
   const started = Date.now();
   const timeoutMs = (Number(job.timeout) || 30) * 1000;
   const state = { timedOut: false };
+  const readLimit = Math.min(Math.max(Number(opts.readLimit) || MAX_BODY_BYTES, MAX_BODY_BYTES), KEYWORD_READ_LIMIT);
 
   const followRedirects = job.follow_redirects === undefined || job.follow_redirects === null
     ? true
     : !!Number(job.follow_redirects);
   const redirectIsSuccess = !!Number(job.redirect_is_success);
   const saveResponses = !(job.save_responses === 0 || job.save_responses === false);
+  const wantBody = saveResponses || readLimit > MAX_BODY_BYTES;
 
   let status = 'error';
   let statusCode = null;
   let errorText = null;
+  let errorCode = null;
   let responseBody = null;
   let responseHeaders = null;
   let timing = null;
@@ -204,8 +220,8 @@ export async function executeJob(job) {
       // Terminal response
       statusCode = sc;
       status = sc >= 200 && sc < 300 ? 'success' : 'failed';
-      if (saveResponses) {
-        responseBody = await readCappedStream(res.stream, MAX_BODY_BYTES);
+      if (wantBody) {
+        responseBody = await readCappedStream(res.stream, readLimit);
       } else {
         res.stream.destroy();
       }
@@ -235,12 +251,14 @@ export async function executeJob(job) {
   } catch (e) {
     if (state.timedOut || e.name === 'TimeoutError' || e.code === 'ETIMEDOUT') {
       status = 'timeout';
+      errorCode = 'TIMEOUT';
       errorText = `Request timed out after ${Math.round(timeoutMs / 1000)}s`;
     } else if (e.code === 'ESSRFBLOCKED' || (e.status === 422 && e.code === 'URL_INVALID')) {
       status = 'error';
       errorText = 'Request blocked by SSRF protection';
     } else {
       status = 'error';
+      errorCode = mapNetworkErrorCode(e);
       errorText = (e.cause?.message || e.message || 'Request failed').slice(0, 500);
     }
   }
@@ -250,6 +268,7 @@ export async function executeJob(job) {
     status_code: statusCode,
     duration_ms: Date.now() - started,
     error: errorText,
+    error_code: errorCode,
     response_body: responseBody,
     response_headers: responseHeaders,
     timing,

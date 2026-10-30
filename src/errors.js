@@ -17,6 +17,12 @@ export const err = {
   userExists: () => new ApiError(409, 'USER_ALREADY_EXISTS', 'This telegram_id is already registered'),
   quotaExceeded: (limit) => new ApiError(403, 'QUOTA_EXCEEDED', `Job limit reached (${limit}). Delete a job or ask the admin to raise the limit`),
   urlInvalid: () => new ApiError(422, 'URL_INVALID', 'url must be a valid http(s) URL'),
+  // v1.2.0
+  contactNotFound: () => new ApiError(404, 'CONTACT_NOT_FOUND', 'Alert contact not found'),
+  maintenanceNotFound: () => new ApiError(404, 'MAINTENANCE_NOT_FOUND', 'Maintenance window not found'),
+  statusPageNotFound: () => new ApiError(404, 'STATUS_PAGE_NOT_FOUND', 'Status page not found'),
+  slugTaken: () => new ApiError(409, 'SLUG_TAKEN', 'This slug is already in use'),
+  invalidJobType: (allowed = 'http, keyword, port, ssl, heartbeat') => new ApiError(422, 'INVALID_JOB_TYPE', `type must be one of: ${allowed}`),
 };
 
 export function ok(res, data, status = 200) {

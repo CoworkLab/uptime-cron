@@ -57,7 +57,13 @@ router.delete('/:telegram_id', asyncH(async (req, res) => {
 
   const jobCount = await db.execute({ sql: 'SELECT COUNT(*) AS c FROM jobs WHERE owner_telegram_id = ?', args: [tid] });
   await db.execute({ sql: `DELETE FROM executions WHERE job_id IN (SELECT id FROM jobs WHERE owner_telegram_id = ?)`, args: [tid] });
+  await db.execute({ sql: `DELETE FROM incidents WHERE telegram_id = ?`, args: [tid] });
+  await db.execute({ sql: `DELETE FROM job_daily WHERE job_id IN (SELECT id FROM jobs WHERE owner_telegram_id = ?)`, args: [tid] });
+  await db.execute({ sql: `DELETE FROM job_rollup_state WHERE job_id IN (SELECT id FROM jobs WHERE owner_telegram_id = ?)`, args: [tid] });
   await db.execute({ sql: 'DELETE FROM jobs WHERE owner_telegram_id = ?', args: [tid] });
+  await db.execute({ sql: 'DELETE FROM alert_contacts WHERE telegram_id = ?', args: [tid] });
+  await db.execute({ sql: 'DELETE FROM maintenance_windows WHERE telegram_id = ?', args: [tid] });
+  await db.execute({ sql: 'DELETE FROM status_pages WHERE telegram_id = ?', args: [tid] });
   await db.execute({ sql: 'DELETE FROM users WHERE telegram_id = ?', args: [tid] });
   ok(res, { deleted: { user: true, telegram_id: tid, jobs: Number(jobCount.rows[0].c) } });
 }));

@@ -42,6 +42,14 @@ const SCHEMA = [
     max_retries INTEGER NOT NULL DEFAULT 0,
     retry_interval INTEGER NOT NULL DEFAULT 60,
     failure_webhook TEXT,
+    recovery_webhook TEXT,
+    success_webhook TEXT,
+    auto_disable_after INTEGER NOT NULL DEFAULT 0,
+    follow_redirects INTEGER NOT NULL DEFAULT 1,
+    redirect_is_success INTEGER NOT NULL DEFAULT 0,
+    auth TEXT,
+    folder TEXT,
+    disabled_reason TEXT,
     save_responses INTEGER NOT NULL DEFAULT 1,
     tags TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
@@ -60,14 +68,38 @@ const SCHEMA = [
     finished_at TEXT,
     error TEXT,
     response_body TEXT,
+    response_headers TEXT,
+    timing TEXT,
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_exec_job ON executions(job_id, started_at)`,
 ];
 
+// Columns added after v1.0.0 — applied to existing databases on boot.
+const MIGRATIONS = [
+  ['jobs', 'recovery_webhook', 'TEXT'],
+  ['jobs', 'success_webhook', 'TEXT'],
+  ['jobs', 'auto_disable_after', 'INTEGER NOT NULL DEFAULT 0'],
+  ['jobs', 'follow_redirects', 'INTEGER NOT NULL DEFAULT 1'],
+  ['jobs', 'redirect_is_success', 'INTEGER NOT NULL DEFAULT 0'],
+  ['jobs', 'auth', 'TEXT'],
+  ['jobs', 'folder', 'TEXT'],
+  ['jobs', 'disabled_reason', 'TEXT'],
+  ['executions', 'response_headers', 'TEXT'],
+  ['executions', 'timing', 'TEXT'],
+];
+
 export async function initSchema() {
   for (const stmt of SCHEMA) {
     await db.execute(stmt);
+  }
+  for (const [table, col, def] of MIGRATIONS) {
+    try {
+      await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+      console.log(`[db] migrated: ${table}.${col} added`);
+    } catch (e) {
+      if (!/duplicate column|already exists/i.test(e.message || '')) throw e;
+    }
   }
 }
 

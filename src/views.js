@@ -35,6 +35,12 @@ export function jobView(row) {
       input: row.schedule_input,
     }),
   };
+  // basic auth is masked: password is never returned (stored safely, sent as header at runtime)
+  let auth = null;
+  try {
+    const a = row.auth ? JSON.parse(row.auth) : null;
+    if (a && a.type === 'basic') auth = { type: 'basic', username: a.username, password: '***' };
+  } catch { auth = null; }
   return {
     id: row.id,
     title: row.title || '',
@@ -50,6 +56,14 @@ export function jobView(row) {
     max_retries: Number(row.max_retries),
     retry_interval: Number(row.retry_interval),
     failure_webhook: row.failure_webhook || null,
+    recovery_webhook: row.recovery_webhook || null,
+    success_webhook: row.success_webhook || null,
+    auto_disable_after: row.auto_disable_after != null ? Number(row.auto_disable_after) : 0,
+    follow_redirects: row.follow_redirects != null ? !!Number(row.follow_redirects) : true,
+    redirect_is_success: row.redirect_is_success != null ? !!Number(row.redirect_is_success) : false,
+    auth,
+    folder: row.folder || null,
+    disabled_reason: row.disabled_reason || null,
     save_responses: !!Number(row.save_responses),
     expires_at: isoOrNull(row.expires_at),
     next_run_at: Number(row.enabled) ? isoOrNull(row.next_run_at) : null,
@@ -77,7 +91,11 @@ export function executionView(row, { withBody = false } = {}) {
     finished_at: row.finished_at || null,
     error: row.error || null,
   };
-  if (withBody) e.response_body = row.response_body ?? null;
+  if (withBody) {
+    e.response_body = row.response_body ?? null;
+    e.response_headers = row.response_headers != null ? jparse(row.response_headers, null) : null;
+    e.timing = row.timing != null ? jparse(row.timing, null) : null;
+  }
   return e;
 }
 

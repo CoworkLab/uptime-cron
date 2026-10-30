@@ -108,3 +108,15 @@ export function vTelegramId(value, name = 'telegram_id') {
   if (!/^\d{3,20}$/.test(v)) throw err.validation(`${name} must be a numeric Telegram user id (digits only)`);
   return v;
 }
+
+export function vAuth(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw err.validation('auth must be an object like {"type":"basic","username":"...","password":"..."}');
+  const type = value.type === undefined ? 'basic' : value.type;
+  if (type !== 'basic') throw err.validation('auth.type must be "basic"');
+  const username = typeof value.username === 'string' ? value.username.trim() : '';
+  const password = typeof value.password === 'string' ? value.password : '';
+  if (!username || username.length > 128) throw err.validation('auth.username is required (max 128 chars)');
+  if (!password || password.length > 256) throw err.validation('auth.password is required (max 256 chars)');
+  return { type: 'basic', username, password };
+}

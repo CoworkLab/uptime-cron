@@ -1,6 +1,6 @@
 {
   "name": "uptime-cron",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Self-hosted cron-job.org style scheduling API with Telegram-scoped multi-user jobs. Node + Express + Turso. Runs on Render free tier.",
   "type": "module",
   "main": "src/server.js",

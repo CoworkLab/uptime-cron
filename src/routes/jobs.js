@@ -5,8 +5,9 @@ import { err, ok, asyncH } from '../errors.js';
 import { genId, genApiKey } from '../ids.js';
 import { parseSchedule, computeNextRun, nextRuns, isValidTimezone } from '../cron.js';
 import {
-  vString, vUrl, vOptionalUrl, vMethod, vInt, vBool, vHeaders, vBody, vTags, vExpiresAt, vTelegramId,
+  vString, vUrl, vOptionalUrl, vMethod, vInt, vBool, vHeaders, vBody, vTags, vExpiresAt, vTelegramId, vAuth,
 } from '../validate.js';
+import { assertSafeUrl } from '../ssrf.js';
 import { parseCurlCommand } from '../curl.js';
 import { jobView, executionView, lastExecutionSummary } from '../views.js';
 import { dispatchManual } from '../scheduler.js';
@@ -45,8 +46,8 @@ async function getJobScoped(req, id) {
   return job;
 }
 
-function buildJobFields(body) {
-  const url = vUrl(body.url);
+async function buildJobFields(body) {
+  const url = await assertSafeUrl(vUrl(body.url));
   const method = vMethod(body.method);
   const headers = vHeaders(body.headers);
   const b = vBody(body.body, method);
@@ -54,6 +55,16 @@ function buildJobFields(body) {
   const maxRetries = vInt(body.max_retries, 'max_retries', { min: 0, max: 3, def: 0 });
   const retryInterval = vInt(body.retry_interval, 'retry_interval', { min: 30, max: 3600, def: 60 });
   const failureWebhook = vOptionalUrl(body.failure_webhook, 'failure_webhook');
+  const recoveryWebhook = vOptionalUrl(body.recovery_webhook, 'recovery_webhook');
+  const successWebhook = vOptionalUrl(body.success_webhook, 'success_webhook');
+  if (failureWebhook) await assertSafeUrl(failureWebhook);
+  if (recoveryWebhook) await assertSafeUrl(recoveryWebhook);
+  if (successWebhook) await assertSafeUrl(successWebhook);
+  const autoDisableAfter = vInt(body.auto_disable_after, 'auto_disable_after', { min: 0, max: 100, def: 0 });
+  const followRedirects = vBool(body.follow_redirects, true);
+  const redirectIsSuccess = vBool(body.redirect_is_success, false);
+  const auth = vAuth(body.auth);
+  const folder = vString(body.folder, 'folder', { max: 60 });
   const saveResponses = vBool(body.save_responses, true);
   const tags = vTags(body.tags);
   const title = vString(body.title, 'title', { max: 120 });
@@ -61,7 +72,12 @@ function buildJobFields(body) {
   const schedule = parseSchedule(body.schedule, config.defaultTimezone);
   const enabled = vBool(body.enabled, true);
 
-  return { url, method, headers, body: b, timeout, maxRetries, retryInterval, failureWebhook, saveResponses, tags, title, expiresAt, schedule, enabled };
+  return {
+    url, method, headers, body: b, timeout, maxRetries, retryInterval,
+    failureWebhook, recoveryWebhook, successWebhook, autoDisableAfter,
+    followRedirects, redirectIsSuccess, auth, folder,
+    saveResponses, tags, title, expiresAt, schedule, enabled,
+  };
 }
 
 // ---------- create ----------
@@ -83,7 +99,7 @@ async function createJobCore(req, res, body) {
   const used = Number(countR.rows[0].c);
   if (req.auth.mode !== 'dev' && used >= config.userJobLimit) throw err.quotaExceeded(config.userJobLimit);
 
-  const f = buildJobFields(body);
+  const f = await buildJobFields(body);
   const id = genId('job_');
   const now = isoNow();
   const nextRun = f.enabled ? computeNextRun(f.schedule).getTime() : null;
@@ -91,12 +107,18 @@ async function createJobCore(req, res, body) {
   await db.execute({
     sql: `INSERT INTO jobs (id, owner_telegram_id, title, url, method, headers, body, timeout,
             schedule_kind, schedule_cron, schedule_input, interval_seconds, timezone,
-            enabled, expires_at, next_run_at, max_retries, retry_interval, failure_webhook, save_responses, tags, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            enabled, expires_at, next_run_at, max_retries, retry_interval,
+            failure_webhook, recovery_webhook, success_webhook, auto_disable_after,
+            follow_redirects, redirect_is_success, auth, folder, disabled_reason,
+            save_responses, tags, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       id, telegram_id, f.title, f.url, f.method, JSON.stringify(f.headers), f.body, f.timeout,
       f.schedule.kind, f.schedule.cron, f.schedule.input, f.schedule.interval_seconds, f.schedule.timezone,
-      f.enabled ? 1 : 0, f.expiresAt, nextRun, f.maxRetries, f.retryInterval, f.failureWebhook,
+      f.enabled ? 1 : 0, f.expiresAt, nextRun, f.maxRetries, f.retryInterval,
+      f.failureWebhook, f.recoveryWebhook, f.successWebhook, f.autoDisableAfter,
+      f.followRedirects ? 1 : 0, f.redirectIsSuccess ? 1 : 0, f.auth ? JSON.stringify(f.auth) : null,
+      f.folder || null, null,
       f.saveResponses ? 1 : 0, JSON.stringify(f.tags), now, now,
     ],
   });
@@ -154,10 +176,10 @@ router.post('/bulk', asyncH(async (req, res) => {
     const j = rowToJobLite(job);
 
     if (action === 'pause') {
-      await db.execute({ sql: `UPDATE jobs SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?`, args: [isoNow(), id] });
+      await db.execute({ sql: `UPDATE jobs SET enabled = 0, next_run_at = NULL, disabled_reason = 'paused_by_user', updated_at = ? WHERE id = ?`, args: [isoNow(), id] });
     } else if (action === 'resume') {
       const next = computeNextRun({ kind: j.schedule_kind, cron: j.schedule_cron, interval_seconds: j.interval_seconds, timezone: j.timezone });
-      await db.execute({ sql: `UPDATE jobs SET enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?`, args: [next.getTime(), isoNow(), id] });
+      await db.execute({ sql: `UPDATE jobs SET enabled = 1, next_run_at = ?, disabled_reason = NULL, updated_at = ? WHERE id = ?`, args: [next.getTime(), isoNow(), id] });
     } else if (action === 'delete') {
       await db.execute({ sql: `DELETE FROM executions WHERE job_id = ?`, args: [id] });
       await db.execute({ sql: `DELETE FROM jobs WHERE id = ?`, args: [id] });
@@ -201,6 +223,10 @@ router.get('/', asyncH(async (req, res) => {
     where.push('tags LIKE ?');
     args.push(`%"${String(q.tag)}"%`);
   }
+  if (q.folder) {
+    where.push('folder = ?');
+    args.push(String(q.folder).slice(0, 60));
+  }
 
   const sortCol = SORTABLE[q.sort] || 'created_at';
   const order = String(q.order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
@@ -238,7 +264,7 @@ async function updateJob(req, res, requireCore) {
   const patch = {};
 
   if (body.title !== undefined) patch.title = vString(body.title, 'title', { max: 120 });
-  if (body.url !== undefined) patch.url = vUrl(body.url);
+  if (body.url !== undefined) patch.url = await assertSafeUrl(vUrl(body.url));
   else if (requireCore) throw err.validation('url is required');
   if (body.method !== undefined) patch.method = vMethod(body.method);
   if (body.headers !== undefined) patch.headers = vHeaders(body.headers);
@@ -246,7 +272,36 @@ async function updateJob(req, res, requireCore) {
   if (body.timeout !== undefined) patch.timeout = vInt(body.timeout, 'timeout', { min: 5, max: 60, def: 30 });
   if (body.max_retries !== undefined) patch.max_retries = vInt(body.max_retries, 'max_retries', { min: 0, max: 3, def: 0 });
   if (body.retry_interval !== undefined) patch.retry_interval = vInt(body.retry_interval, 'retry_interval', { min: 30, max: 3600, def: 60 });
-  if (body.failure_webhook !== undefined) patch.failure_webhook = vOptionalUrl(body.failure_webhook, 'failure_webhook');
+  if (body.failure_webhook !== undefined) {
+    const fw = vOptionalUrl(body.failure_webhook, 'failure_webhook');
+    if (fw) await assertSafeUrl(fw);
+    patch.failure_webhook = fw;
+  }
+  if (body.recovery_webhook !== undefined) {
+    const rw = vOptionalUrl(body.recovery_webhook, 'recovery_webhook');
+    if (rw) await assertSafeUrl(rw);
+    patch.recovery_webhook = rw;
+  }
+  if (body.success_webhook !== undefined) {
+    const sw = vOptionalUrl(body.success_webhook, 'success_webhook');
+    if (sw) await assertSafeUrl(sw);
+    patch.success_webhook = sw;
+  }
+  if (body.auto_disable_after !== undefined) patch.auto_disable_after = vInt(body.auto_disable_after, 'auto_disable_after', { min: 0, max: 100, def: 0 });
+  if (body.follow_redirects !== undefined) patch.follow_redirects = vBool(body.follow_redirects, true);
+  if (body.redirect_is_success !== undefined) patch.redirect_is_success = vBool(body.redirect_is_success, false);
+  if (body.auth !== undefined) {
+    let a = vAuth(body.auth);
+    // Masked password from a previous GET -> keep the stored password
+    if (a && a.password === '***') {
+      let stored = null;
+      try { stored = job.auth ? JSON.parse(job.auth) : null; } catch { stored = null; }
+      if (stored && stored.type === 'basic') a = { ...a, password: stored.password };
+      else throw err.validation('auth.password is required');
+    }
+    patch.auth = a ? JSON.stringify(a) : null;
+  }
+  if (body.folder !== undefined) patch.folder = vString(body.folder, 'folder', { max: 60 }) || null;
   if (body.save_responses !== undefined) patch.save_responses = vBool(body.save_responses, true);
   if (body.tags !== undefined) patch.tags = vTags(body.tags);
   if (body.expires_at !== undefined) patch.expires_at = vExpiresAt(body.expires_at);
@@ -272,6 +327,9 @@ async function updateJob(req, res, requireCore) {
   }
 
   const enabled = body.enabled !== undefined ? vBool(body.enabled, true) : !!Number(job.enabled);
+  if (body.enabled !== undefined) {
+    patch.disabled_reason = enabled ? null : 'paused_by_user';
+  }
   const method = patch.method || job.method;
   if (patch.body !== undefined && patch.body && !['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
     throw err.validation(`body is not allowed for ${method}`);
@@ -281,8 +339,8 @@ async function updateJob(req, res, requireCore) {
   const sets = [];
   const args = [];
   for (const [k, v] of Object.entries(patch)) {
-    if (k === 'headers' || k === 'tags') { sets.push(`${k} = ?`); args.push(JSON.stringify(v)); }
-    else if (k === 'save_responses') { sets.push(`${k} = ?`); args.push(v ? 1 : 0); }
+    if (k === 'headers' || k === 'tags' || k === 'auth') { sets.push(`${k} = ?`); args.push(JSON.stringify(v)); }
+    else if (k === 'save_responses' || k === 'follow_redirects' || k === 'redirect_is_success') { sets.push(`${k} = ?`); args.push(v ? 1 : 0); }
     else { sets.push(`${k} = ?`); args.push(v); }
   }
 
@@ -315,7 +373,7 @@ router.delete('/:id', asyncH(async (req, res) => {
 
 router.post('/:id/stop', asyncH(async (req, res) => {
   const job = await getJobScoped(req, req.params.id);
-  await db.execute({ sql: `UPDATE jobs SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?`, args: [isoNow(), job.id] });
+  await db.execute({ sql: `UPDATE jobs SET enabled = 0, next_run_at = NULL, disabled_reason = 'paused_by_user', updated_at = ? WHERE id = ?`, args: [isoNow(), job.id] });
   const row = await db.execute({ sql: 'SELECT * FROM jobs WHERE id = ?', args: [job.id] });
   ok(res, { job: jobView(row.rows[0]), message: 'Job paused' });
 }));
@@ -324,7 +382,7 @@ router.post('/:id/start', asyncH(async (req, res) => {
   const job = await getJobScoped(req, req.params.id);
   const schedule = { kind: job.schedule_kind, cron: job.schedule_cron, interval_seconds: job.interval_seconds, timezone: job.timezone };
   const next = computeNextRun(schedule);
-  await db.execute({ sql: `UPDATE jobs SET enabled = 1, next_run_at = ?, updated_at = ? WHERE id = ?`, args: [next.getTime(), isoNow(), job.id] });
+  await db.execute({ sql: `UPDATE jobs SET enabled = 1, next_run_at = ?, disabled_reason = NULL, updated_at = ? WHERE id = ?`, args: [next.getTime(), isoNow(), job.id] });
   const row = await db.execute({ sql: 'SELECT * FROM jobs WHERE id = ?', args: [job.id] });
   ok(res, { job: jobView(row.rows[0]), message: 'Job resumed' });
 }));
@@ -428,7 +486,15 @@ function rowToJobLite(row) {
     max_retries: Number(row.max_retries),
     retry_interval: Number(row.retry_interval),
     failure_webhook: row.failure_webhook,
+    recovery_webhook: row.recovery_webhook,
+    success_webhook: row.success_webhook,
+    auto_disable_after: row.auto_disable_after != null ? Number(row.auto_disable_after) : 0,
+    follow_redirects: row.follow_redirects != null ? !!Number(row.follow_redirects) : true,
+    redirect_is_success: row.redirect_is_success != null ? !!Number(row.redirect_is_success) : false,
+    auth: row.auth || null,
+    folder: row.folder || null,
     save_responses: !!Number(row.save_responses),
+    consecutive_fails: Number(row.consecutive_fails || 0),
   };
 }
 

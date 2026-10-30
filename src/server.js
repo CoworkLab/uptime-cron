@@ -86,6 +86,27 @@ app.use('/v1/users', auth, devOnly, usersRouter);
 app.use('/v1/jobs', auth, jobsRouter);
 app.use('/v1/meta', auth, metaRouter);
 
+// folders across the caller's jobs (dev: all, or ?telegram_id= filter)
+app.get('/v1/folders', auth, async (req, res, next) => {
+  try {
+    const q = req.query || {};
+    const where = ["folder IS NOT NULL", "folder != ''"];
+    const args = [];
+    if (req.auth.mode === 'user') {
+      where.push('owner_telegram_id = ?');
+      args.push(req.auth.user.telegram_id);
+    } else if (q.telegram_id) {
+      where.push('owner_telegram_id = ?');
+      args.push(String(q.telegram_id));
+    }
+    const r = await db.execute({
+      sql: `SELECT folder AS name, COUNT(*) AS job_count FROM jobs WHERE ${where.join(' AND ')} GROUP BY folder ORDER BY name ASC`,
+      args,
+    });
+    ok(res, { folders: r.rows.map((row) => ({ name: row.name, job_count: Number(row.job_count) })) });
+  } catch (e) { next(e); }
+});
+
 // ---------- clean 404 + error handling ----------
 
 app.use((req, res) => {

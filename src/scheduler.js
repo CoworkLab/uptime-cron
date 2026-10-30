@@ -2,6 +2,7 @@ import { db, isoNow } from './db.js';
 import { config } from './config.js';
 import { computeNextRun } from './cron.js';
 import { executeJob } from './executor.js';
+import { assertSafeUrl } from './ssrf.js';
 import { genId } from './ids.js';
 
 let ticking = false;
@@ -31,7 +32,15 @@ function rowToJob(row) {
     max_retries: Number(row.max_retries),
     retry_interval: Number(row.retry_interval),
     failure_webhook: row.failure_webhook,
+    recovery_webhook: row.recovery_webhook,
+    success_webhook: row.success_webhook,
+    auto_disable_after: row.auto_disable_after != null ? Number(row.auto_disable_after) : 0,
+    follow_redirects: row.follow_redirects != null ? !!Number(row.follow_redirects) : true,
+    redirect_is_success: row.redirect_is_success != null ? !!Number(row.redirect_is_success) : false,
+    auth: row.auth || null,
+    folder: row.folder || null,
     save_responses: !!Number(row.save_responses),
+    consecutive_fails: Number(row.consecutive_fails || 0),
   };
 }
 
@@ -80,7 +89,7 @@ async function claimAndDispatch(job) {
   // Job expired -> auto-disable
   if (job.expires_at && newNext.getTime() > job.expires_at) {
     await db.execute({
-      sql: `UPDATE jobs SET enabled = 0, next_run_at = NULL, updated_at = ? WHERE id = ?`,
+      sql: `UPDATE jobs SET enabled = 0, next_run_at = NULL, disabled_reason = 'expired', updated_at = ? WHERE id = ?`,
       args: [isoNow(), job.id],
     });
     console.log(`[scheduler] job ${job.id} expired -> disabled`);
@@ -112,8 +121,81 @@ async function runJobWithRetries(job) {
     if (attempt < maxAttempts) await sleep(job.retry_interval * 1000);
   }
 
-  if (lastResult && lastResult.status !== 'success') {
-    await fireFailureWebhook(job, lastResult, maxAttempts);
+  await finalizeRun(job, lastResult, maxAttempts);
+}
+
+/**
+ * Post-run side effects shared by scheduled and manual runs:
+ * success/recovery webhooks, failure webhook, auto-disable after N consecutive fails.
+ */
+async function finalizeRun(job, result, attemptsUsed) {
+  if (!result) return;
+  const prevFails = Number(job.consecutive_fails || 0);
+
+  if (result.status === 'success') {
+    if (job.success_webhook) {
+      await fireWebhook(job.success_webhook, {
+        event: 'success',
+        job_id: job.id,
+        status_code: result.status_code,
+        duration_ms: result.duration_ms,
+      });
+    }
+    if (job.recovery_webhook && prevFails > 0) {
+      await fireWebhook(job.recovery_webhook, {
+        event: 'recovered',
+        job_id: job.id,
+        title: job.title || '',
+        downtime_runs: prevFails,
+        at: new Date().toISOString(),
+      });
+    }
+    return;
+  }
+
+  // failed / timeout / error
+  const newFails = prevFails + 1;
+  const autoAfter = Number(job.auto_disable_after || 0);
+
+  if (autoAfter > 0 && newFails >= autoAfter) {
+    await db.execute({
+      sql: `UPDATE jobs SET enabled = 0, next_run_at = NULL, disabled_reason = 'auto_disabled_after_failures', updated_at = ? WHERE id = ?`,
+      args: [isoNow(), job.id],
+    });
+    console.log(`[scheduler] job ${job.id} auto-disabled after ${newFails} consecutive fails`);
+    if (job.failure_webhook) {
+      await fireWebhook(job.failure_webhook, {
+        event: 'auto_disabled',
+        occurred_at: new Date().toISOString(),
+        job: { id: job.id, title: job.title || '', telegram_id: job.owner_telegram_id },
+        auto_disable_after: autoAfter,
+        consecutive_fails: newFails,
+        last_error: result.error,
+      });
+    }
+    return;
+  }
+
+  if (job.failure_webhook) {
+    await fireWebhook(job.failure_webhook, {
+      event: 'failed',
+      occurred_at: new Date().toISOString(),
+      job: {
+        id: job.id,
+        title: job.title || '',
+        telegram_id: job.owner_telegram_id,
+        url: job.url,
+        method: job.method,
+        schedule: job.schedule_input,
+      },
+      execution: {
+        status: result.status,
+        status_code: result.status_code,
+        duration_ms: result.duration_ms,
+        error: result.error,
+        attempts_used: attemptsUsed,
+      },
+    });
   }
 }
 
@@ -122,8 +204,8 @@ async function logExecution(job, result, attempt, maxAttempts, execId = null) {
   const nowIso = new Date().toISOString();
   try {
     await db.execute({
-      sql: `INSERT INTO executions (id, job_id, attempt, status, status_code, duration_ms, started_at, finished_at, error, response_body, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO executions (id, job_id, attempt, status, status_code, duration_ms, started_at, finished_at, error, response_body, response_headers, timing, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         finalExecId,
         job.id,
@@ -135,6 +217,8 @@ async function logExecution(job, result, attempt, maxAttempts, execId = null) {
         nowIso,
         result.error,
         result.response_body ?? null,
+        result.response_headers ?? null,
+        result.timing ? JSON.stringify(result.timing) : null,
         nowIso,
       ],
     });
@@ -164,36 +248,22 @@ async function logExecution(job, result, attempt, maxAttempts, execId = null) {
   }
 }
 
-async function fireFailureWebhook(job, result, maxAttempts) {
-  if (!job.failure_webhook) return;
-  const payload = {
-    event: 'job.failed',
-    occurred_at: new Date().toISOString(),
-    job: {
-      id: job.id,
-      title: job.title || '',
-      telegram_id: job.owner_telegram_id,
-      url: job.url,
-      method: job.method,
-      schedule: job.schedule_input,
-    },
-    execution: {
-      status: result.status,
-      status_code: result.status_code,
-      duration_ms: result.duration_ms,
-      error: result.error,
-      attempts_used: maxAttempts,
-    },
-  };
+async function fireWebhook(url, payload) {
   try {
-    await fetch(job.failure_webhook, {
+    await assertSafeUrl(url);
+  } catch {
+    console.error(`[webhook] blocked by SSRF protection: ${url}`);
+    return;
+  }
+  try {
+    await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'uptime-cron/1.0' },
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'uptime-cron/1.1' },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(10000),
     });
   } catch (e) {
-    console.error(`[webhook] failed for job ${job.id}:`, e.message);
+    console.error(`[webhook] failed for ${payload?.job_id || '?'}:`, e.message);
   }
 }
 
@@ -205,6 +275,7 @@ export function dispatchManual(job) {
     try {
       const result = await executeJob(job);
       await logExecution(job, result, 1, 1, execId);
+      await finalizeRun(job, result, 1);
     } catch (e) {
       console.error(`[manual] job ${job.id}:`, e.message);
     } finally {

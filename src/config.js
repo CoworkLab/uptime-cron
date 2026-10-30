@@ -12,5 +12,5 @@ export const config = {
   tickSeconds: int(process.env.TICK_SECONDS, 10),
   maxConcurrency: int(process.env.MAX_CONCURRENCY, 20),
   rateLimitPerMin: int(process.env.RATE_LIMIT_PER_MIN, 120),
-  version: '1.0.0',
+  version: '1.1.0',
 };

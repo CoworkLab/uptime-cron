@@ -7,7 +7,7 @@ import { userView } from '../views.js';
 
 const router = Router();
 
-// All /v1/users routes are dev-only (middleware applied at mount time)
+// All /v1/users routes are bot-developer only (bot token; middleware applied at mount time)
 
 router.post('/', asyncH(async (req, res) => {
   const body = req.body || {};

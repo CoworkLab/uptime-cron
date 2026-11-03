@@ -51,7 +51,7 @@ app.get('/v1/me', auth, async (req, res, next) => {
   try {
     if (req.auth.mode === 'dev') {
       const r = await db.execute({ sql: 'SELECT COUNT(*) AS c FROM jobs', args: [] });
-      return ok(res, { key_type: 'dev', telegram_id: null, jobs: { total: Number(r.rows[0].c) } });
+      return ok(res, { key_type: 'bot', telegram_id: null, jobs: { total: Number(r.rows[0].c) } });
     }
     const r = await db.execute({
       sql: 'SELECT COUNT(*) AS c FROM jobs WHERE owner_telegram_id = ?',
@@ -221,7 +221,7 @@ app.get('/status/:slug', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// folders across the caller's jobs (dev: all, or ?telegram_id= filter)
+// folders across the caller's jobs (bot token: all, or ?telegram_id= filter)
 app.get('/v1/folders', auth, async (req, res, next) => {
   try {
     const q = req.query || {};
@@ -270,9 +270,8 @@ async function boot() {
     console.error('FATAL: TURSO_DATABASE_URL is not set');
     process.exit(1);
   }
-  if (!config.devKey) {
-    console.error('FATAL: DEV_API_KEY is not set');
-    process.exit(1);
+  if (!config.telegramBotToken) {
+    console.warn('[warn] TELEGRAM_BOT_TOKEN is not set — developer endpoints (/v1/users, /v1/stats), bot-token developer access and Telegram alert delivery are disabled');
   }
   await initSchema();
   console.log(`[db] connected to Turso (${config.tursoUrl.split('@')[1] || config.tursoUrl})`);

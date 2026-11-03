@@ -1,11 +1,11 @@
 # uptime-cron
 
-Self-hosted, cron-job.org style **scheduling + uptime monitoring API** (no UI — API only) with **Telegram-scoped multi-user jobs**. Built to run free on Render, with Turso (libSQL) as the database. **v1.2.0**
+Self-hosted, cron-job.org style **scheduling + uptime monitoring API** (no UI — API only) with **Telegram-scoped multi-user jobs**. Built to run free on Render, with Turso (libSQL) as the database. **v1.3.0**
 
 - Node 20 + Express
 - Turso (libSQL) cloud storage — survives restarts, deploys and free-tier spin-downs
 - Per-user job isolation via Telegram IDs (perfect backend for a Telegram bot)
-- Dev key for full global admin access
+- **Bot token = developer access** (bot owner is the bot developer — no separate dev API key)
 - Minimum schedule interval: **2 minutes** (strictly validated, including tricky cron gaps)
 - **SSRF protection**: job URLs and webhook URLs are validated on create/update/import *and* re-validated at execution time (after DNS resolve, every redirect hop)
 - **Webhook events**: `failed`, `auto_disabled`, `recovered`, `success` (+ `down`, `up`, `ssl_expiring`, `heartbeat_missed` to alert contacts)
@@ -22,20 +22,22 @@ Authorization: Bearer <api_key>
 ```
 (`X-API-Key: <api_key>` header also accepted)
 
-| Key type | Who | Powers |
+| Credential | Who | Powers |
 |---|---|---|
-| `uc_dev_...` | Bot developer / admin | Everything: all users, all jobs, global stats, register users |
+| **Bot token** (`TELEGRAM_BOT_TOKEN`, sent as `Bearer <bot_token>`) | Bot developer / bot owner | Everything: all users, all jobs, global stats, register users, act on behalf of any user |
 | `uc_user_...` | Telegram user (via bot) | Only their own jobs — automatically scoped, cannot be bypassed |
+
+> v1.3.0 removed the `uc_dev_` dev API key system. Old `uc_dev_` keys no longer authenticate.
 
 ### Bot integration flow
 
 ```
-1. New Telegram user -> bot calls POST /v1/users (dev key) { telegram_id, username }
+1. New Telegram user -> bot calls POST /v1/users (with the bot token) { telegram_id, username }
 2. Store the returned api_key for that user
 3. Bot performs all user actions with the user's key (scoping is automatic)
 ```
 
-Shortcut: the dev key + `telegram_id` in the request body also works for any user operation.
+Shortcut: the bot token + `telegram_id` in the request body also works for any user operation.
 
 ---
 
@@ -85,7 +87,7 @@ Timezone: any IANA timezone (default from `DEFAULT_TIMEZONE` env, e.g. `Asia/Kol
 | GET | `/v1/jobs/:id/history.csv` | CSV export of history |
 | GET | `/v1/incidents` | All incidents of the caller's jobs (`?job_id&ongoing&limit&offset`) |
 | GET | `/v1/dashboard` | `{jobs:{total,up,down,paused,pending}, ongoing_incidents, uptime_24h_percent, avg_response_ms}` |
-| GET | `/v1/folders` | Folder list with job counts (`?telegram_id=` for dev) |
+| GET | `/v1/folders` | Folder list with job counts (`?telegram_id=` for bot token) |
 | POST | `/v1/jobs/bulk` | `{ action: "pause"\|"resume"\|"delete"\|"run", job_ids: [...] }` |
 | POST | `/v1/jobs/import/curl` | Import from a curl command (`create: true` to create directly) |
 | POST | `/v1/meta/preview-schedule` | Next N run times + human text |
@@ -98,7 +100,7 @@ Timezone: any IANA timezone (default from `DEFAULT_TIMEZONE` env, e.g. `Asia/Kol
 | GET | `/status/:slug` | **Public** HTML status page (cached 30s, light/dark) |
 | GET | `/status/:slug/json` | **Public** status JSON |
 
-### Dev key only
+### Bot token only (developer endpoints)
 | Method | Path | Description |
 |---|---|---|
 | POST | `/v1/users` | Register Telegram user -> generates `api_key` |
@@ -260,13 +262,13 @@ Masking: header values and basic-auth passwords are returned as `***`; send `"**
 
 | Env | Default | Meaning |
 |---|---|---|
-| `USER_JOB_LIMIT` | 25 | Jobs per Telegram user (dev unlimited) |
+| `USER_JOB_LIMIT` | 25 | Jobs per Telegram user (bot-token creation unlimited) |
 | `MIN_INTERVAL_SECONDS` | 120 | Minimum schedule gap |
 | `HISTORY_LIMIT` | 50 | Executions kept per job |
 | `MAX_CONCURRENCY` | 20 | Parallel executions |
 | `RATE_LIMIT_PER_MIN` | 120 | API requests per key per minute |
 | `DEFAULT_TIMEZONE` | UTC | Default timezone |
-| `TELEGRAM_BOT_TOKEN` | – | Telegram alert delivery (optional) |
+| `TELEGRAM_BOT_TOKEN` | – | **Required**: bot-token developer auth + Telegram alert delivery |
 | `RESEND_API_KEY` / `RESEND_FROM` | – | Email alerts via Resend (optional) |
 | `USER_CONTACT_LIMIT` | 10 | Alert contacts per user |
 | `INCIDENTS_RETENTION_DAYS` | 90 | Incident history retention |
@@ -276,7 +278,7 @@ Masking: header values and basic-auth passwords are returned as `***`; send `"**
 1. Push this repo to GitHub
 2. Render -> New Web Service -> connect repo
 3. Runtime: Node, Build: `npm install`, Start: `node src/server.js`
-4. Env vars: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `DEV_API_KEY`, `DEFAULT_TIMEZONE`
+4. Env vars: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `TELEGRAM_BOT_TOKEN`, `DEFAULT_TIMEZONE`
 5. Keep it awake: external pinger on `/healthz` every 5 minutes (free-tier services sleep after 15 idle minutes)
 
 Create a free Turso database at [turso.tech](https://turso.tech) — tables are created automatically on first boot.

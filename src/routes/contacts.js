@@ -20,7 +20,7 @@ function scope(req, bodyTid = undefined) {
 router.post('/', asyncH(async (req, res) => {
   const body = req.body || {};
   const telegram_id = scope(req, body.telegram_id);
-  if (!telegram_id) throw err.validation('telegram_id is required when using the dev key');
+  if (!telegram_id) throw err.validation('telegram_id is required when using the bot token');
   const type = vContactType(body.type);
   const target = vContactTarget(type, body.target);
   const name = vString(body.name, 'name', { max: 60 });

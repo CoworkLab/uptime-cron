@@ -12,7 +12,3 @@ export function genId(prefix, len = 12) {
 export function genApiKey() {
   return 'uc_user_' + crypto.randomBytes(24).toString('hex');
 }
-
-export function genDevKey() {
-  return 'uc_dev_' + crypto.randomBytes(24).toString('hex');
-}

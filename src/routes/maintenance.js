@@ -37,7 +37,7 @@ async function validateJobIds(jobIds, telegram_id) {
 router.post('/', asyncH(async (req, res) => {
   const body = req.body || {};
   const telegram_id = scope(req, body.telegram_id);
-  if (!telegram_id) throw err.validation('telegram_id is required when using the dev key');
+  if (!telegram_id) throw err.validation('telegram_id is required when using the bot token');
 
   const name = vString(body.name, 'name', { max: 80 });
   const recurrence = vRecurrence(body.recurrence);

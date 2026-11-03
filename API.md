@@ -1,10 +1,10 @@
-# uptime-cron API — Complete Reference (v1.2.0)
+# uptime-cron API — Complete Reference (v1.3.0)
 
 Single-file documentation for the **uptime-cron** REST API — a cron-job.org style scheduling + uptime-monitoring API with Telegram-scoped multi-user jobs. This document is self-contained: an external developer (or AI agent) can build a full Telegram Bot client on top of the API using only this file. No code access is needed.
 
 - **Base URL:** `https://uptime-cron.onrender.com`
 - **API base:** `/v1`
-- **Current version:** `1.2.0`
+- **Current version:** `1.3.0`
 - **Transport:** HTTPS, JSON only (`Content-Type: application/json` for request bodies)
 - **Hosting:** Render (free tier) + Turso (libSQL). Free tier can sleep after inactivity; sleep periods are tracked as "monitoring gaps" and excluded from uptime math (see §18).
 
@@ -17,7 +17,7 @@ Single-file documentation for the **uptime-cron** REST API — a cron-job.org st
 5. [Schedules & timezones](#5-schedules--timezones)
 6. [Object schemas](#6-object-schemas)
 7. [System endpoints](#7-system-endpoints)
-8. [Users API (dev only)](#8-users-api-dev-only)
+8. [Users API (bot token only)](#8-users-api-bot-token-only)
 9. [Jobs API](#9-jobs-api)
 10. [Folders, incidents, dashboard, stats](#10-folders-incidents-dashboard-stats)
 11. [Alert contacts API](#11-alert-contacts-api)
@@ -68,14 +68,16 @@ Authorization: Bearer <api_key>
 X-API-Key: <api_key>
 ```
 
-There are two key types:
+There are two credential types. **Since v1.3.0 there is no separate dev API key** — the old `uc_dev_` keys were removed and no longer authenticate (they return `401 UNAUTHORIZED`). The **bot token itself is the developer credential**: whoever owns the bot (= the bot developer) holds full developer access.
 
-| Key type | Format | Scope | Who uses it |
+| Credential | Format | Scope | Who uses it |
 |---|---|---|---|
+| **Bot token (developer)** | The Telegram bot token configured on the server (`TELEGRAM_BOT_TOKEN`), e.g. `8315391251:AAE...` | **Developer access** — everything for every user: manage all jobs/contacts/maintenance windows/status pages, register & delete users, rotate user keys, platform stats, create resources on behalf of any `telegram_id`. | The bot itself (bot owner = bot developer). Never expose it to end users. |
 | **User key** | `uc_user_` + 48 hex chars | Bound to one `telegram_id`. Can only see and control **its own** jobs, contacts, maintenance windows and status pages. | Issued per Telegram user (see §8). This is the key a bot stores per chat. |
-| **Dev key** | `uc_dev_` + 48 hex chars | Global admin access. Can manage **every** user's resources and can create/manage users. | Held by the bot operator only. Never share it with end users. |
 
-Key-type detection is automatic: the server compares the key against the configured dev key first; otherwise it looks the key up in the `users` table. `GET /v1/me` tells you which type a key is.
+Credential-type detection is automatic: the server compares the presented credential against its configured bot token (timing-safe) first; otherwise it looks the key up in the `users` table. `GET /v1/me` tells you which type a credential is (`key_type: "bot"` or `key_type: "user"`).
+
+> **Migrating from v1.2.0:** everywhere this document previously said "dev key", send the bot token instead (`Authorization: Bearer <TELEGRAM_BOT_TOKEN>`). Endpoints, parameters and response shapes are unchanged.
 
 ### Rate limiting
 
@@ -87,19 +89,19 @@ Key-type detection is automatic: the server compares the key against the configu
 
 - Rate limiting is applied **before** key validation, so even invalid keys consume the limit bucket for that key string.
 - Restarting the service resets rate-limit counters (they are in-memory).
-- Requests must be authenticated per request; there are no sessions or tokens beyond the static API key.
+- Requests must be authenticated per request; there are no sessions or OAuth — just the two static credentials (bot token + user keys).
 
 ## 3. Multi-user scoping model
 
 - Every job, alert contact, maintenance window and status page is owned by a **`telegram_id`** (a numeric Telegram user id, stored as a string of 3–20 digits).
-- A user row is created either explicitly via `POST /v1/users` (dev key) or **implicitly** the first time a job is created for a `telegram_id` (auto-provisioning with a generated `uc_user_` key).
+- A user row is created either explicitly via `POST /v1/users` (bot token) or **implicitly** the first time a job is created for a `telegram_id` (auto-provisioning with a generated `uc_user_` key).
 - All reads/writes with a **user key** are silently filtered to that user's `telegram_id`. If a user key requests another user's job id, the API returns the same `404 JOB_NOT_FOUND` as for a nonexistent job (existence is not revealed).
-- With a **dev key**, resources are global. Endpoints that list resources accept `?telegram_id=<id>` to filter, and creation endpoints accept a `telegram_id` field in the body to create on behalf of a user.
-- Job quota: **25 jobs per user** (configurable via `USER_JOB_LIMIT`). Dev-key creation bypasses the quota. Exceeding it → `403 QUOTA_EXCEEDED`.
+- With the **bot token (developer access)**, resources are global. Endpoints that list resources accept `?telegram_id=<id>` to filter, and creation endpoints accept a `telegram_id` field in the body to create on behalf of a user.
+- Job quota: **25 jobs per user** (configurable via `USER_JOB_LIMIT`). Bot-token creation bypasses the quota. Exceeding it → `403 QUOTA_EXCEEDED`.
 
 ### What each key can call
 
-| Endpoint group | User key | Dev key |
+| Endpoint group | User key | Bot token (developer) |
 |---|---|---|
 | `/v1/me`, jobs, folders, incidents, dashboard, contacts, maintenance, status-pages, meta, heartbeat | ✅ (own data) | ✅ (all data) |
 | `/v1/users/*` (create/list/delete/regenerate-key) | ❌ 403 | ✅ |
@@ -112,7 +114,7 @@ Key-type detection is automatic: the server compares the key against the configu
 |---|---|---|
 | 400 | `INVALID_JSON` | Request body is not valid JSON |
 | 401 | `UNAUTHORIZED` | Missing/invalid API key (header missing, key unknown) |
-| 403 | `FORBIDDEN` | Endpoint requires the dev key, or action not allowed for this key (e.g. creating a job for another telegram_id) |
+| 403 | `FORBIDDEN` | Endpoint requires the bot token (bot developer only), or action not allowed for a user key (e.g. creating a job for another telegram_id) |
 | 403 | `QUOTA_EXCEEDED` | Job limit reached (default 25 per user) |
 | 404 | `NOT_FOUND` | Unknown route / wrong method on a known route |
 | 404 | `JOB_NOT_FOUND` | Job does not exist **or** belongs to another user |
@@ -434,9 +436,27 @@ An incident opens when a job transitions to `down` and closes on the first succe
 
 Use this for keep-alive pings (an external cron pings it every 5 minutes to reduce free-tier sleep).
 
-## 8. Users API (dev only)
+### 7.3 `GET /v1/me` — credential info & quota
 
-All `/v1/users` routes require the **dev key**; a user key gets `403 FORBIDDEN`.
+The response depends on the credential used:
+
+**Bot token (developer):**
+
+```json
+{ "ok": true, "data": { "key_type": "bot", "telegram_id": null, "jobs": { "total": 57 } } }
+```
+
+**User key:**
+
+```json
+{ "ok": true, "data": { "key_type": "user", "telegram_id": "6123456789", "username": "somename", "jobs": { "used": 3, "limit": 25 } } }
+```
+
+`jobs.total` is the platform-wide job count (developer view); `jobs.used` / `jobs.limit` is the user's own quota usage.
+
+## 8. Users API (bot token only)
+
+All `/v1/users` routes require the **bot token** (bot developer only); a user key gets `403 FORBIDDEN`.
 
 ### 8.1 `POST /v1/users` — register a user
 
@@ -449,7 +469,7 @@ Body:
 
 ```bash
 curl -X POST https://uptime-cron.onrender.com/v1/users \
-  -H "Authorization: Bearer $DEV_KEY" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $BOT_TOKEN" -H "Content-Type: application/json" \
   -d '{"telegram_id":"6123456789","username":"somename"}'
 ```
 
@@ -518,7 +538,7 @@ Cascades: jobs, executions, incidents, daily rollups, alert contacts, maintenanc
 
 ## 9. Jobs API
 
-A **job is both a scheduled cron task and a monitor**. All routes under `/v1/jobs` accept user keys (own jobs) and the dev key (all jobs).
+A **job is both a scheduled cron task and a monitor**. All routes under `/v1/jobs` accept user keys (own jobs) and the bot token (all jobs — developer access).
 
 ### 9.1 `POST /v1/jobs` — create a job/monitor
 
@@ -526,7 +546,7 @@ Body (all fields optional unless marked ✅; defaults shown):
 
 | Field | Type / range | Default | Notes |
 |---|---|---|---|
-| `telegram_id` | string | — | **Required when using the dev key** (the owner). With a user key it must be omitted or equal to the key's own id, else `403 FORBIDDEN`. |
+| `telegram_id` | string | — | **Required when using the bot token** (the owner). With a user key it must be omitted or equal to the key's own telegram_id, else `403 FORBIDDEN`. |
 | `username` | string | — | Used only for auto-provisioning the user row on first job |
 | `title` | string ≤ 120 | `""` | |
 | `type` | enum | `http` | `http` \| `keyword` \| `port` \| `ssl` \| `heartbeat` |
@@ -604,7 +624,7 @@ Example — keyword monitor:
 }
 ```
 
-Example — port monitor (dev key, on behalf of a user):
+Example — port monitor (bot token, on behalf of a user):
 
 ```json
 {
@@ -638,7 +658,7 @@ Query params (all optional):
 
 | Param | Values | Notes |
 |---|---|---|
-| `telegram_id` | id | dev key only; without it dev sees **all** jobs |
+| `telegram_id` | id | bot token only; without it the bot token sees **all** jobs |
 | `search` | string | substring match on `title` or `url` |
 | `enabled` | `true` / `false` | |
 | `status` | string | matches `last_status` (e.g. `success`) |
@@ -856,7 +876,7 @@ curl -X POST https://uptime-cron.onrender.com/v1/jobs/import/curl \
 }
 ```
 
-**Create mode** — add `"create": true` and `"schedule"` (plus any other job fields like `title`, `telegram_id` for dev): the parsed request is merged and the normal create pipeline runs (SSRF + validation + 201 job response).
+**Create mode** — add `"create": true` and `"schedule"` (plus any other job fields like `title`, `telegram_id` when using the bot token): the parsed request is merged and the normal create pipeline runs (SSRF + validation + 201 job response).
 
 Supported curl flags: `-X/--request`, `-H/--header`, `-d/--data/--data-raw/--data-binary/--data-ascii`, `--data-urlencode`, `--json`, `-u/--user` (converted to an `Authorization: Basic ...` header), `--url`, bare URL. Common flags (`-L`, `-s`, `-k`, `-v`, ...) are ignored. `-F/--form` (multipart) is rejected with a clear `422` message.
 
@@ -883,7 +903,7 @@ Body:
 
 ### 10.1 `GET /v1/folders`
 
-Folder names with job counts across the caller's jobs (dev key: all users, or `?telegram_id=`).
+Folder names with job counts across the caller's jobs (bot token: all users, or `?telegram_id=`).
 
 ```json
 { "ok": true, "data": { "folders": [ { "name": "production", "job_count": 5 }, { "name": "staging", "job_count": 2 } ] } }
@@ -891,7 +911,7 @@ Folder names with job counts across the caller's jobs (dev key: all users, or `?
 
 ### 10.2 `GET /v1/incidents` — incidents across all my jobs
 
-Query: `job_id`, `ongoing`=`true`/`false`, `limit` (1–100, default 20), `offset`, and `telegram_id` (dev key only).
+Query: `job_id`, `ongoing`=`true`/`false`, `limit` (1–100, default 20), `offset`, and `telegram_id` (bot token only).
 
 ```json
 { "ok": true, "data": { "incidents": [ { "...incident..." } ], "pagination": { "total": 7, "limit": 20, "offset": 0 } } }
@@ -911,9 +931,9 @@ Query: `job_id`, `ongoing`=`true`/`false`, `limit` (1–100, default 20), `offse
 }
 ```
 
-Dev key accepts `?telegram_id=` to scope. Considers up to 100 jobs; `uptime_24h_percent` is the mean of per-job 24h uptime (null when no data); `avg_response_ms` is the mean duration of the last 24h executions.
+Bot token accepts `?telegram_id=` to scope. Considers up to 100 jobs; `uptime_24h_percent` is the mean of per-job 24h uptime (null when no data); `avg_response_ms` is the mean duration of the last 24h executions.
 
-### 10.4 `GET /v1/stats` — platform stats (dev only)
+### 10.4 `GET /v1/stats` — platform stats (bot token only)
 
 ```json
 {
@@ -940,7 +960,7 @@ Alert contacts are delivery targets for DOWN/UP alerts (§17). Max **10 per user
 | `type` | ✅ `telegram` \| `email` \| `webhook` \| `discord` \| `slack` |
 | `target` | ✅ type-specific (below) |
 | `name` | optional label ≤ 60 chars |
-| `telegram_id` | dev key only (owner) |
+| `telegram_id` | bot token only (owner) |
 
 Target formats:
 
@@ -990,7 +1010,7 @@ All routes under `/v1/maintenance`. See §6.5 for semantics: checks still run du
 | `timezone` | IANA, default `UTC` |
 | `start_at`, `end_at` | recurrence `none`: ISO 8601 datetimes (`end` must be after `start`); `daily`/`weekly`: `"HH:MM"` |
 | `weekday` | required for `weekly`: 0=Sun..6=Sat |
-| `telegram_id` | dev key only |
+| `telegram_id` | bot token only |
 
 ```json
 { "name": "Sunday deploy", "recurrence": "weekly", "weekday": 0, "start_at": "02:30", "end_at": "04:00", "timezone": "Asia/Kolkata", "job_ids": [] }
@@ -1022,11 +1042,11 @@ All routes under `/v1/status-pages`. A page shows the owner's monitors (all enab
 | `uptime_days` | 1–365, default 30 (bar range + uptime window) |
 | `message` | optional banner text ≤ 300 chars |
 | `enabled` | default `true` |
-| `telegram_id` | dev key only |
+| `telegram_id` | bot token only |
 
 Response `201`: `{ "ok": true, "data": { "status_page": { "...status page..." } } }` with `public_url: "/status/<slug>"`.
 
-### 13.2 `GET /v1/status-pages` — list mine (dev: all, or `?telegram_id=`)
+### 13.2 `GET /v1/status-pages` — list mine (bot token: all, or `?telegram_id=`)
 
 ### 13.3 `GET /v1/status-pages/:id` — by page id
 
@@ -1312,7 +1332,7 @@ downtime_seconds  = Σ incident overlap with the range, minus maintenance/gap in
 
 | Limit | Value |
 |---|---|
-| Jobs per user | 25 (dev key bypasses) |
+| Jobs per user | 25 (bot-token creation bypasses) |
 | Alert contacts per user | 10 |
 | Alert contacts per job | 10 |
 | History (executions) per job | 50 most recent |
@@ -1340,12 +1360,12 @@ downtime_seconds  = Σ incident overlap with the range, minus maintenance/gap in
 
 ## 20. Telegram Bot integration guide
 
-Recommended architecture: the bot holds the **dev key** privately and issues one **user key** per Telegram user.
+Recommended architecture: the bot authenticates as the developer with its **own bot token** (the same `TELEGRAM_BOT_TOKEN` it already uses for Telegram — only the bot owner has it) and issues one **user key** per Telegram user.
 
 ### 20.1 Onboarding flow
 
 1. User sends `/start` in Telegram. Bot reads `msg.from.id` (and `msg.from.username`).
-2. Bot (dev key) calls `POST /v1/users { "telegram_id": "<id>", "username": "<username>" }`.
+2. Bot (bot token) calls `POST /v1/users { "telegram_id": "<id>", "username": "<username>" }`.
    - `409 USER_ALREADY_EXISTS` → user exists; the bot should have their key stored. If the key was lost, call `POST /v1/users/:telegram_id/regenerate-key` and store the new one.
 3. Store `(telegram_id → api_key)` in the bot's own database. **All subsequent calls use the user's `uc_user_` key**, so scoping is enforced server-side even if your bot code has a bug.
 4. Create a default alert contact so the user gets DOWN/UP messages: `POST /v1/contacts { "type": "telegram", "target": "<chat_id>" }` with the user key (target = the chat where alerts should land — for a DM it equals the user id; the user must have started the bot, or Telegram rejects the send).
@@ -1365,13 +1385,13 @@ Recommended architecture: the bot holds the **dev key** privately and issues one
 | `/alerts` | `GET /v1/contacts`, `POST /v1/contacts`, `POST /v1/contacts/:id/test` |
 | `/maintenance` | `/v1/maintenance` CRUD |
 | `/statuspage` | `/v1/status-pages` CRUD → share the `public_url` |
-| `/stats` (admin) | `GET /v1/stats` with dev key |
+| `/stats` (admin) | `GET /v1/stats` with the bot token |
 
 ### 20.3 Receiving alerts in the bot
 
 Two complementary mechanisms (both can be used):
 
-1. **Alert contacts (server-push, recommended):** register a `telegram` contact per chat; the server delivers DOWN/UP messages via the Telegram Bot API itself. No webhook infrastructure needed in the bot. Note: this uses the bot token configured on the **server** (`TELEGRAM_BOT_TOKEN`) — currently the same bot. Messages come from the bot, so they appear normal to users.
+1. **Alert contacts (server-push, recommended):** register a `telegram` contact per chat; the server delivers DOWN/UP messages via the Telegram Bot API itself. No webhook infrastructure needed in the bot. Note: this uses the bot token configured on the **server** (`TELEGRAM_BOT_TOKEN`) — the same token that is also the API's developer credential (§2), so the bot already holds it. Messages come from the bot, so they appear normal to users.
 2. **Per-job webhooks:** set `failure_webhook`/`recovery_webhook`/`success_webhook` to an HTTPS endpoint of the bot (must be public, port 443, SSRF rules apply). Useful for rich formatting/logging. Payloads in §17.4.
 
 ### 20.4 Error handling tips
@@ -1387,10 +1407,11 @@ Two complementary mechanisms (both can be used):
 ### 20.5 Deployment notes for the bot host
 
 - The bot itself does **not** need to run on Render — it only needs outbound HTTPS to `uptime-cron.onrender.com` and (for webhook mode) a public HTTPS endpoint.
-- The API's `TELEGRAM_BOT_TOKEN` env var (set on Render) powers server-side Telegram alert delivery; `RESEND_API_KEY`/`RESEND_FROM` would be needed for email alerts (currently unset — email contacts will report "email alerts not configured on the server" when tested).
+- The API's `TELEGRAM_BOT_TOKEN` env var (set on Render) powers **bot-token developer authentication (§2)** and server-side Telegram alert delivery; `RESEND_API_KEY`/`RESEND_FROM` would be needed for email alerts (currently unset — email contacts will report "email alerts not configured on the server" when tested).
 
 ## 21. Version changelog
 
 - **v1.0.0** — Scheduling core: jobs CRUD, cron/`@every`/object schedules, 10 s tick scheduler, execution history + stats, multi-user `telegram_id` scoping, user keys + dev key, curl import, bulk ops, folders, failure webhooks, `GET /v1/me`, `GET /v1/stats`.
 - **v1.1.0** — SSRF protection (create/update + runtime + per-hop), recovery/success webhooks, `auto_disable_after`, timing breakdown, response headers, redirect control (`follow_redirects`, `redirect_is_success`), Basic auth, URL variables (`%date%`, `%time%`, `%timestamp%`, `%job_id%`), header/auth masking.
 - **v1.2.0** — Monitor types (`keyword`, `port`, `ssl`, `heartbeat`), monitor state machine + incidents, alert contacts (telegram/email/webhook/discord/slack) with dedupe/delay/repeat, uptime % + response-time series (24h/7d/30d/90d), maintenance windows, public status pages (HTML + JSON), public heartbeat endpoint, CSV history export, `/v1/dashboard`, monitoring-gap tracking, `expected_status`, `max_response_ms`, daily rollups, 90-day incident retention.
+- **v1.3.0** — **Breaking:** removed the `uc_dev_` dev API key system. The **bot token** (`TELEGRAM_BOT_TOKEN`) is now the developer credential — bot owner = bot developer: send it as `Authorization: Bearer <bot_token>` (or `X-API-Key`) for full developer access (all users' resources, `/v1/users/*`, `/v1/stats`, create on behalf of any `telegram_id`). Old `uc_dev_` keys return `401 UNAUTHORIZED`. `GET /v1/me` returns `key_type: "bot"` for the bot token (was `"dev"`). User-key behavior and all other endpoints are unchanged.

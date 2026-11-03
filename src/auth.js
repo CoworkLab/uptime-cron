@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { db } from './db.js';
 import { config } from './config.js';
 import { err, fail } from './errors.js';
@@ -30,6 +31,14 @@ export function extractKey(req) {
   return x ? String(x).trim() : null;
 }
 
+// constant-time comparison via sha256 digests (length-independent)
+function isBotToken(presented) {
+  if (!config.telegramBotToken) return false;
+  const a = crypto.createHash('sha256').update(String(presented)).digest();
+  const b = crypto.createHash('sha256').update(config.telegramBotToken).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 export async function auth(req, res, next) {
   try {
     const key = extractKey(req);
@@ -40,7 +49,10 @@ export async function auth(req, res, next) {
       return fail(res, 429, 'RATE_LIMITED', `Rate limit exceeded (${config.rateLimitPerMin} requests/minute). Retry shortly`);
     }
 
-    if (config.devKey && key === config.devKey) {
+    // Bot token = developer credential (bot owner == bot developer). Since v1.3.0 there is
+    // no separate uc_dev_ API key — presenting the server's own TELEGRAM_BOT_TOKEN grants
+    // full developer access.
+    if (isBotToken(key)) {
       req.auth = { mode: 'dev', key };
       return next();
     }
@@ -66,7 +78,7 @@ export async function auth(req, res, next) {
 
 export function devOnly(req, res, next) {
   if (req.auth?.mode !== 'dev') {
-    return fail(res, 403, 'FORBIDDEN', 'This endpoint requires the dev API key');
+    return fail(res, 403, 'FORBIDDEN', 'This endpoint requires the bot token (bot developer only)');
   }
   next();
 }
